@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 __version__ = "1.0.0"
 
 # GitHub repository for auto-updates
-GITHUB_REPO = "kaangunduzlu-code/tf2classified_itemschema_updater"
+GITHUB_REPO = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
 VERSION_CHECK_URL = f"{GITHUB_RAW_URL}/VERSION"
 SCRIPT_UPDATE_URL = f"{GITHUB_RAW_URL}/tf2_schema_updater.py"
