@@ -10,17 +10,24 @@ import string
 import requests
 import time
 import shutil
+import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
+from urllib.parse import urljoin, urlparse
 
 # Version
 __version__ = "1.0.0"
 
-# GitHub repository for auto-updates
-GITHUB_REPO = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
-GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main"
-VERSION_CHECK_URL = f"{GITHUB_RAW_URL}/VERSION"
-SCRIPT_UPDATE_URL = f"{GITHUB_RAW_URL}/tf2_schema_updater.py"
+# GitHub Pages URLs for auto-updates
+GITHUB_PAGES_BASE = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
+VERSION_CHECK_URL = f"{GITHUB_PAGES_BASE}/VERSION"
+SCRIPT_UPDATE_URL = f"{GITHUB_PAGES_BASE}/tf2_schema_updater.py"
+
+# FastDL URLs for checking required custom files
+FASTDL_BASE = "https://kaangunduzlu-code.github.io/fastdl"
+FASTDL_REPO = "kaangunduzlu-code/fastdl"
+FASTDL_API_URL = f"https://api.github.com/repos/{FASTDL_REPO}/git/trees/main?recursive=1"
+BASE_RAW_URL = f"https://raw.githubusercontent.com/{FASTDL_REPO}/main/"
 
 # GitHub Gist URL for the item schema
 GIST_URL = "https://gist.githubusercontent.com/kaangunduzlu-code/cad0897491d7d397d0ec279d235141c3/raw"
@@ -75,7 +82,7 @@ def check_for_updates() -> Optional[str]:
         return None
 
 
-def download_with_progress(url: str, description: str = "Downloading") -> Optional[str]:
+def download_with_progress(url: str, description: str = "Downloading", binary: bool = False):
     """Download content with progress indication"""
     try:
         response = requests.get(url, stream=True, timeout=30)
@@ -98,7 +105,14 @@ def download_with_progress(url: str, description: str = "Downloading") -> Option
             content.append(response.content)
             print(" Done!")
         
-        return b''.join(content).decode('utf-8')
+        full_content = b''.join(content)
+        
+        # Return binary or text based on parameter
+        if binary:
+            return full_content
+        else:
+            return full_content.decode('utf-8')
+            
     except Exception as e:
         print(f"\n✗ Download failed: {e}")
         return None
@@ -156,6 +170,192 @@ def show_update_prompt(latest_version: str) -> bool:
     
     choice = get_user_choice("\nEnter your choice (1 or 2): ", ['1', '2'])
     return choice == '1'
+
+
+def get_fastdl_downloads() -> List[Tuple[str, str]]:
+    """Fetch list of required download files from fastdl repository
+    Returns list of tuples: (relative_path, filename)
+    """
+    try:
+        print("Fetching list of required custom files from fastdl repository...")
+        response = requests.get(FASTDL_API_URL, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if 'tree' not in data:
+            print("⚠ Could not parse repository structure")
+            return []
+        
+        files = []
+        
+        # Filter files: only from allowed folders, not maps folder
+        for item in data['tree']:
+            if item['type'] == 'blob':  # It's a file, not a directory
+                path = item['path']
+                
+                # Check if it's in an allowed folder (case insensitive)
+                path_lower = path.lower()
+                
+                # CRITICAL FIX: Allow materials, models, sound, and downloads. Exclude maps and .git files.
+                if ('map' not in path_lower) and not path_lower.startswith('.git'):
+                    # Get just the filename
+                    filename = os.path.basename(path)
+                    files.append((path, filename))
+                    print(f"  Found: {path}")
+        
+        print(f"\n✓ Found {len(files)} custom files")
+        return files
+        
+    except Exception as e:
+        print(f"⚠ Could not fetch custom files list: {e}")
+        return []
+
+
+def check_custom_files(tf2_dir: Path) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """Check which custom files are present and which are missing
+    Returns: (found_files, missing_files) where each is a list of (path, filename) tuples
+    """
+    required_files = get_fastdl_downloads()
+    
+    if not required_files:
+        return [], []
+    
+    print(f"\nChecking for {len(required_files)} required custom files...")
+    
+    # Common locations for custom files in TF2 Classified
+    search_paths = [
+        tf2_dir / "download",
+        tf2_dir / "downloads",
+        tf2_dir / "materials",
+        tf2_dir / "custom",
+        tf2_dir,  # Root tf directory
+    ]
+    
+    found_files = []
+    missing_files = []
+    
+    for file_path, filename in required_files:
+        file_found = False
+        
+        # Search in all common locations
+        for search_path in search_paths:
+            if search_path.exists():
+                # Search recursively for this specific filename
+                for found_file in search_path.rglob(filename):
+                    if found_file.is_file():
+                        found_files.append((file_path, filename))
+                        file_found = True
+                        break
+            
+            if file_found:
+                break
+        
+        if not file_found:
+            missing_files.append((file_path, filename))
+    
+    return found_files, missing_files
+
+
+def download_custom_file(file_path: str, filename: str, tf2_dir: Path) -> bool:
+    """Download a custom file from fastdl to the TF2 directory
+    file_path: relative path in the repository (e.g., 'materials/models/player.vmt')
+    filename: just the filename
+    """
+    try:
+        # CRITICAL FIX: Use BASE_RAW_URL instead of FASTDL_BASE to get the actual file data
+        file_url = f"{BASE_RAW_URL}{file_path}"
+        
+        print(f"\nDownloading {filename}...")
+        print(f"  From: {file_path}")
+        content = download_with_progress(file_url, f"  Progress", binary=True)
+        
+        if not content:
+            return False
+        
+        # Preserve the directory structure from the repository
+        # Extract the directory structure from file_path
+        rel_path = Path(file_path)
+        
+        # Save to tf2 directory maintaining structure
+        target_file = tf2_dir / rel_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write as binary
+        with open(target_file, 'wb') as f:
+            f.write(content)
+        
+        print(f"  ✓ Saved to: {target_file}")
+        return True
+        
+    except Exception as e:
+        print(f"  ✗ Failed to download {filename}: {e}")
+        return False
+
+
+def handle_custom_files_check(tf2_dir: Path):
+    """Handle the custom files check and offer to download missing ones"""
+    print_header("Checking Custom Item Files")
+    
+    found_files, missing_files = check_custom_files(tf2_dir)
+    
+    if not found_files and not missing_files:
+        print("⚠ Could not check custom files (fastdl unavailable or no files listed)")
+        return
+    
+    total_required = len(found_files) + len(missing_files)
+    
+    if not missing_files:
+        print(f"✓ All {total_required} required custom files are installed!")
+        print("\nYour installation is complete and ready to use.")
+        return
+    
+    print(f"\nStatus:")
+    print(f"  ✓ Found: {len(found_files)}/{total_required}")
+    print(f"  ✗ Missing: {len(missing_files)}/{total_required}")
+    
+    if missing_files:
+        print("\nMissing files:")
+        for file_path, filename in missing_files[:10]:  # Show first 10
+            print(f"  • {filename}")
+            print(f"    Path: {file_path}")
+        
+        if len(missing_files) > 10:
+            print(f"  ... and {len(missing_files) - 10} more")
+        
+        print("\n⚠ WARNING: The item schema requires these custom files to work properly!")
+        print("Without them, you may experience crashes or missing content.")
+        
+        print("\nWhat would you like to do?")
+        print("  1. Download missing files now")
+        print("  2. Skip (not recommended)")
+        
+        choice = get_user_choice("\nEnter your choice (1 or 2): ", ['1', '2'])
+        
+        if choice == '1':
+            print_header("Downloading Missing Files")
+            
+            successful = 0
+            failed = 0
+            
+            for file_path, filename in missing_files:
+                if download_custom_file(file_path, filename, tf2_dir):
+                    successful += 1
+                else:
+                    failed += 1
+            
+            print(f"\n{'='*60}")
+            print(f"Download Summary:")
+            print(f"  ✓ Successful: {successful}")
+            if failed > 0:
+                print(f"  ✗ Failed: {failed}")
+            print(f"{'='*60}\n")
+            
+            if successful > 0:
+                print("✓ Custom files have been installed!")
+        else:
+            print("\n⚠ Skipping custom files download.")
+            print("You can run this tool again later to download them.")
 
 
 def get_available_drives() -> List[str]:
@@ -393,6 +593,11 @@ def main():
     print_header("Success!")
     print("Item schema has been successfully installed/updated.")
     print(f"Location: {selected_tf2 / SCHEMA_PATHS[location]}")
+    
+    # Check for required custom files
+    time.sleep(1)
+    handle_custom_files_check(selected_tf2)
+    
     input("\nPress Enter to exit...")
 
 
