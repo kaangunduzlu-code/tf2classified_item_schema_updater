@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple, Set
 from urllib.parse import urljoin, urlparse
 
 # Version
-__version__ = "1.0.0"
+__version__ = "1.0.2"
 
 # GitHub Pages URLs for auto-updates
 GITHUB_PAGES_BASE = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
