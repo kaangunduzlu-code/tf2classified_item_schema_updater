@@ -4,6 +4,12 @@ TF2 Classified Item Schema Updater
 Searches for TF2 Classified installation and updates/installs item schema from GitHub Gist
 """
 
+#!/usr/bin/env python3
+"""
+TF2 Classified Item Schema Updater
+Searches for TF2 Classified installation and updates/installs item schema from GitHub Gist
+"""
+
 import os
 import sys
 import string
@@ -16,7 +22,7 @@ from typing import List, Optional, Tuple, Set
 from urllib.parse import urljoin, urlparse
 
 # Version
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 # GitHub Pages URLs for auto-updates
 GITHUB_PAGES_BASE = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
@@ -27,7 +33,7 @@ SCRIPT_UPDATE_URL = f"{GITHUB_PAGES_BASE}/tf2_schema_updater.py"
 FASTDL_BASE = "https://kaangunduzlu-code.github.io/fastdl"
 FASTDL_REPO = "kaangunduzlu-code/fastdl"
 FASTDL_API_URL = f"https://api.github.com/repos/{FASTDL_REPO}/git/trees/main?recursive=1"
-BASE_RAW_URL = f"https://raw.githubusercontent.com/{FASTDL_REPO}/main/"
+FASTDL_MANIFEST_URL = f"{FASTDL_BASE}/REQUIRED_FILES.txt"  # Manifest file for faster checking
 
 # GitHub Gist URL for the item schema
 GIST_URL = "https://gist.githubusercontent.com/kaangunduzlu-code/cad0897491d7d397d0ec279d235141c3/raw"
@@ -175,10 +181,45 @@ def show_update_prompt(latest_version: str) -> bool:
 def get_fastdl_downloads() -> List[Tuple[str, str]]:
     """Fetch list of required download files from fastdl repository
     Returns list of tuples: (relative_path, filename)
+    
+    Strategy:
+    1. Try to fetch REQUIRED_FILES.txt manifest (fast - recommended for 100+ files)
+    2. Fallback to GitHub API tree (slow for repositories with many files)
     """
+    # Try manifest file first (MUCH faster for large repositories)
     try:
-        print("Fetching list of required custom files from fastdl repository...")
-        response = requests.get(FASTDL_API_URL, timeout=10)
+        print("Checking for REQUIRED_FILES.txt manifest...")
+        response = requests.get(FASTDL_MANIFEST_URL, timeout=10)
+        
+        if response.status_code == 200:
+            print("✓ Found manifest file (fast mode)")
+            print("Fetching list of required custom files from manifest...\n")
+            
+            files = []
+            for line in response.text.strip().split('\n'):
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Each line should be a file path
+                filename = os.path.basename(line)
+                files.append((line, filename))
+                print(f"  {line}")
+            
+            print(f"\n✓ Found {len(files)} custom files in manifest")
+            return files
+            
+    except Exception as e:
+        print(f"⚠ Manifest not found, falling back to repository scan...")
+    
+    # Fallback to GitHub API (slower for large repos)
+    try:
+        print("\n⚠ WARNING: Scanning entire repository (this may take a while for large repos)")
+        print("  TIP: Create a REQUIRED_FILES.txt file in your fastdl repo for faster checking!\n")
+        print("Fetching repository tree from GitHub API...")
+        
+        response = requests.get(FASTDL_API_URL, timeout=30)
         response.raise_for_status()
         
         data = response.json()
@@ -187,24 +228,33 @@ def get_fastdl_downloads() -> List[Tuple[str, str]]:
             print("⚠ Could not parse repository structure")
             return []
         
-        files = []
+        print(f"Processing {len(data['tree'])} items from repository...")
         
-        # Filter files: only from allowed folders, not maps folder
+        files = []
+        processed = 0
+        
+        # Filter files: only from downloads folder, not maps folder
         for item in data['tree']:
+            processed += 1
+            
+            # Show progress every 100 items
+            if processed % 100 == 0:
+                print(f"  Processed {processed}/{len(data['tree'])} items...", end='\r')
+            
             if item['type'] == 'blob':  # It's a file, not a directory
                 path = item['path']
                 
-                # Check if it's in an allowed folder (case insensitive)
+                # Check if it's in a downloads folder (case insensitive)
                 path_lower = path.lower()
                 
-                # CRITICAL FIX: Allow materials, models, sound, and downloads. Exclude maps and .git files.
-                if ('map' not in path_lower) and not path_lower.startswith('.git'):
+                # Must contain 'download' or 'downloads' in the path
+                # Must NOT contain 'map' or 'maps' in the path
+                if ('download' in path_lower) and ('map' not in path_lower):
                     # Get just the filename
                     filename = os.path.basename(path)
                     files.append((path, filename))
-                    print(f"  Found: {path}")
         
-        print(f"\n✓ Found {len(files)} custom files")
+        print(f"\n✓ Found {len(files)} custom files in downloads folder (scanned {len(data['tree'])} total items)")
         return files
         
     except Exception as e:
@@ -227,7 +277,6 @@ def check_custom_files(tf2_dir: Path) -> Tuple[List[Tuple[str, str]], List[Tuple
     search_paths = [
         tf2_dir / "download",
         tf2_dir / "downloads",
-        tf2_dir / "materials",
         tf2_dir / "custom",
         tf2_dir,  # Root tf directory
     ]
@@ -259,12 +308,12 @@ def check_custom_files(tf2_dir: Path) -> Tuple[List[Tuple[str, str]], List[Tuple
 
 def download_custom_file(file_path: str, filename: str, tf2_dir: Path) -> bool:
     """Download a custom file from fastdl to the TF2 directory
-    file_path: relative path in the repository (e.g., 'materials/models/player.vmt')
+    file_path: relative path in the repository (e.g., 'downloads/custom_weapons.vpk')
     filename: just the filename
     """
     try:
-        # CRITICAL FIX: Use BASE_RAW_URL instead of FASTDL_BASE to get the actual file data
-        file_url = f"{BASE_RAW_URL}{file_path}"
+        # Construct the full GitHub Pages URL using the repository path
+        file_url = f"{FASTDL_BASE}/{file_path}"
         
         print(f"\nDownloading {filename}...")
         print(f"  From: {file_path}")
@@ -297,6 +346,18 @@ def handle_custom_files_check(tf2_dir: Path):
     """Handle the custom files check and offer to download missing ones"""
     print_header("Checking Custom Item Files")
     
+    print("This will check if you have all required custom files from fastdl.")
+    print("\nWhat would you like to do?")
+    print("  1. Check for missing files (recommended)")
+    print("  2. Skip this check")
+    
+    choice = get_user_choice("\nEnter your choice (1 or 2): ", ['1', '2'])
+    
+    if choice == '2':
+        print("\n⚠ Skipping custom files check.")
+        return
+    
+    print()  # Empty line
     found_files, missing_files = check_custom_files(tf2_dir)
     
     if not found_files and not missing_files:
@@ -306,8 +367,8 @@ def handle_custom_files_check(tf2_dir: Path):
     total_required = len(found_files) + len(missing_files)
     
     if not missing_files:
-        print(f"✓ All {total_required} required custom files are installed!")
-        print("\nYour installation is complete and ready to use.")
+        print(f"\n✓ All {total_required} required custom files are installed!")
+        print("Your installation is complete and ready to use.")
         return
     
     print(f"\nStatus:")
@@ -315,10 +376,11 @@ def handle_custom_files_check(tf2_dir: Path):
     print(f"  ✗ Missing: {len(missing_files)}/{total_required}")
     
     if missing_files:
-        print("\nMissing files:")
+        print("\nMissing files (showing first 10):")
         for file_path, filename in missing_files[:10]:  # Show first 10
             print(f"  • {filename}")
-            print(f"    Path: {file_path}")
+            if len(file_path) < 60:
+                print(f"    Path: {file_path}")
         
         if len(missing_files) > 10:
             print(f"  ... and {len(missing_files) - 10} more")
@@ -337,8 +399,10 @@ def handle_custom_files_check(tf2_dir: Path):
             
             successful = 0
             failed = 0
+            total = len(missing_files)
             
-            for file_path, filename in missing_files:
+            for idx, (file_path, filename) in enumerate(missing_files, 1):
+                print(f"\n[{idx}/{total}] {filename}")
                 if download_custom_file(file_path, filename, tf2_dir):
                     successful += 1
                 else:
@@ -346,9 +410,9 @@ def handle_custom_files_check(tf2_dir: Path):
             
             print(f"\n{'='*60}")
             print(f"Download Summary:")
-            print(f"  ✓ Successful: {successful}")
+            print(f"  ✓ Successful: {successful}/{total}")
             if failed > 0:
-                print(f"  ✗ Failed: {failed}")
+                print(f"  ✗ Failed: {failed}/{total}")
             print(f"{'='*60}\n")
             
             if successful > 0:
