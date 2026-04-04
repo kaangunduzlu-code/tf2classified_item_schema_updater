@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple, Set
 from urllib.parse import urljoin, urlparse
 
 # Version
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 # GitHub Pages URLs for auto-updates
 GITHUB_PAGES_BASE = "https://kaangunduzlu-code.github.io/tf2classified_item_schema_updater"
@@ -27,7 +27,6 @@ SCRIPT_UPDATE_URL = f"{GITHUB_PAGES_BASE}/tf2_schema_updater.py"
 FASTDL_BASE = "https://kaangunduzlu-code.github.io/fastdl"
 FASTDL_REPO = "kaangunduzlu-code/fastdl"
 FASTDL_API_URL = f"https://api.github.com/repos/{FASTDL_REPO}/git/trees/main?recursive=1"
-BASE_RAW_URL = f"https://raw.githubusercontent.com/{FASTDL_REPO}/main/"
 
 # GitHub Gist URL for the item schema
 GIST_URL = "https://gist.githubusercontent.com/kaangunduzlu-code/cad0897491d7d397d0ec279d235141c3/raw"
@@ -213,7 +212,7 @@ def get_fastdl_downloads() -> List[Tuple[str, str]]:
 
 
 def check_custom_files(tf2_dir: Path) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """Check which custom files are present and which are missing
+    """Check which custom files are present and which are missing (OPTIMIZED)
     Returns: (found_files, missing_files) where each is a list of (path, filename) tuples
     """
     required_files = get_fastdl_downloads()
@@ -221,60 +220,92 @@ def check_custom_files(tf2_dir: Path) -> Tuple[List[Tuple[str, str]], List[Tuple
     if not required_files:
         return [], []
     
-    print(f"\nChecking for {len(required_files)} required custom files...")
+    total_required = len(required_files)
+    print(f"\nChecking for {total_required} required custom files...")
+    print("Building file index (this may take a moment)...\n")
     
-    # Common locations for custom files in TF2 Classified
+    # OPTIMIZATION: Build a comprehensive file index first (one-time scan)
+    # This is much faster than searching for each file individually
     search_paths = [
         tf2_dir / "download",
-        tf2_dir / "downloads",
-        tf2_dir / "materials",
+        tf2_dir / "downloads", 
         tf2_dir / "custom",
-        tf2_dir,  # Root tf directory
+        tf2_dir,
     ]
     
+    # Create a dictionary mapping filename -> list of full paths
+    file_index = {}
+    indexed_count = 0
+    
+    for search_path in search_paths:
+        if search_path.exists():
+            try:
+                # Use glob instead of rglob for speed, limit depth
+                for pattern in ['**/*', '*/*', '*/*/*', '*/*/*/*']:
+                    for file_path in search_path.glob(pattern):
+                        if file_path.is_file():
+                            filename = file_path.name.lower()
+                            if filename not in file_index:
+                                file_index[filename] = []
+                            file_index[filename].append(file_path)
+                            indexed_count += 1
+                            
+                            # Show progress
+                            if indexed_count % 500 == 0:
+                                print(f"  Indexed {indexed_count} files...", end='\r')
+            except Exception as e:
+                print(f"  Warning: Could not scan {search_path}: {e}")
+                continue
+    
+    print(f"  ✓ Indexed {indexed_count} files from TF2 directory\n")
+    
+    # Now quickly check each required file against the index
     found_files = []
     missing_files = []
+    checked = 0
     
     for file_path, filename in required_files:
-        file_found = False
+        checked += 1
         
-        # Search in all common locations
-        for search_path in search_paths:
-            if search_path.exists():
-                # Search recursively for this specific filename
-                for found_file in search_path.rglob(filename):
-                    if found_file.is_file():
-                        found_files.append((file_path, filename))
-                        file_found = True
-                        break
-            
-            if file_found:
-                break
+        # Show progress every 50 files
+        if checked % 50 == 0:
+            print(f"  Checking {checked}/{total_required}...", end='\r')
         
-        if not file_found:
+        # Quick lookup in our index
+        filename_lower = filename.lower()
+        if filename_lower in file_index:
+            found_files.append((file_path, filename))
+        else:
             missing_files.append((file_path, filename))
+    
+    print(f"  ✓ Checked all {total_required} files\n")
     
     return found_files, missing_files
 
 
 def download_custom_file(file_path: str, filename: str, tf2_dir: Path) -> bool:
     """Download a custom file from fastdl to the TF2 directory
-    file_path: relative path in the repository (e.g., 'materials/models/player.vmt')
+    file_path: relative path in the repository (e.g., 'downloads/custom_weapons.vpk')
     filename: just the filename
     """
     try:
-        # CRITICAL FIX: Use BASE_RAW_URL instead of FASTDL_BASE to get the actual file data
-        file_url = f"{BASE_RAW_URL}{file_path}"
+        # Construct the full GitHub Pages URL using the repository path
+        file_url = f"{FASTDL_BASE}/{file_path}"
         
-        print(f"\nDownloading {filename}...")
-        print(f"  From: {file_path}")
+        print(f"  URL: {file_url}")
+        
+        # Download with retry
         content = download_with_progress(file_url, f"  Progress", binary=True)
         
         if not content:
+            print(f"  ✗ Download failed (empty content)")
+            return False
+        
+        if len(content) == 0:
+            print(f"  ✗ Download failed (0 bytes)")
             return False
         
         # Preserve the directory structure from the repository
-        # Extract the directory structure from file_path
         rel_path = Path(file_path)
         
         # Save to tf2 directory maintaining structure
@@ -285,18 +316,85 @@ def download_custom_file(file_path: str, filename: str, tf2_dir: Path) -> bool:
         with open(target_file, 'wb') as f:
             f.write(content)
         
-        print(f"  ✓ Saved to: {target_file}")
+        # Verify the file was written
+        if not target_file.exists():
+            print(f"  ✗ File not created")
+            return False
+        
+        file_size = target_file.stat().st_size
+        if file_size == 0:
+            print(f"  ✗ File is empty (0 bytes)")
+            return False
+        
+        print(f"  ✓ Saved: {file_size:,} bytes → {target_file.name}")
+        
         return True
         
     except Exception as e:
-        print(f"  ✗ Failed to download {filename}: {e}")
+        print(f"  ✗ Error: {e}")
         return False
 
 
 def handle_custom_files_check(tf2_dir: Path):
-    """Handle the custom files check and offer to download missing ones"""
-    print_header("Checking Custom Item Files")
+    """Handle the custom files check or download all files"""
+    print_header("Custom Item Files Check")
     
+    print("Do you want to check which files are missing, or download all files?")
+    print("\nOptions:")
+    print("  1. Check for missing files (only download what you need)")
+    print("  2. Skip check and download all files (replaces existing)")
+    
+    choice = get_user_choice("\nEnter your choice (1 or 2): ", ['1', '2'])
+    
+    if choice == '2':
+        # Skip check - download ALL files
+        print("\nSkipping check - downloading all custom files...")
+        print("This will download and replace all existing files.\n")
+        
+        time.sleep(1)
+        
+        # Get all files from repository
+        all_files = get_fastdl_downloads()
+        
+        if not all_files:
+            print("⚠ Could not retrieve file list from fastdl repository")
+            return
+        
+        print_header(f"Downloading All {len(all_files)} Files")
+        
+        successful = 0
+        failed = 0
+        failed_files = []
+        
+        for idx, (file_path, filename) in enumerate(all_files, 1):
+            print(f"\n[{idx}/{len(all_files)}] {filename}")
+            
+            if download_custom_file(file_path, filename, tf2_dir):
+                successful += 1
+            else:
+                failed += 1
+                failed_files.append(filename)
+        
+        # Summary
+        print(f"\n{'='*60}")
+        print("Download Complete!")
+        print(f"{'='*60}")
+        print(f"✓ Successful: {successful}/{len(all_files)}")
+        if failed > 0:
+            print(f"✗ Failed: {failed}/{len(all_files)}")
+            print(f"\nFailed files:")
+            for fname in failed_files[:10]:
+                print(f"  • {fname}")
+            if len(failed_files) > 10:
+                print(f"  ... and {len(failed_files) - 10} more")
+        else:
+            print("\n🎉 All files downloaded successfully!")
+        print(f"{'='*60}\n")
+        
+        return
+    
+    # Option 1: Check for missing files only
+    print("\nChecking for missing files...\n")
     found_files, missing_files = check_custom_files(tf2_dir)
     
     if not found_files and not missing_files:
@@ -314,48 +412,46 @@ def handle_custom_files_check(tf2_dir: Path):
     print(f"  ✓ Found: {len(found_files)}/{total_required}")
     print(f"  ✗ Missing: {len(missing_files)}/{total_required}")
     
-    if missing_files:
-        print("\nMissing files:")
-        for file_path, filename in missing_files[:10]:  # Show first 10
-            print(f"  • {filename}")
-            print(f"    Path: {file_path}")
+    print("\nMissing files:")
+    for file_path, filename in missing_files[:10]:  # Show first 10
+        print(f"  • {filename}")
+    
+    if len(missing_files) > 10:
+        print(f"  ... and {len(missing_files) - 10} more")
+    
+    print(f"\n⚠ Automatically downloading {len(missing_files)} missing files...\n")
+    time.sleep(1)
+    
+    print_header(f"Downloading {len(missing_files)} Missing Files")
+    
+    successful = 0
+    failed = 0
+    failed_files = []
+    
+    for idx, (file_path, filename) in enumerate(missing_files, 1):
+        print(f"\n[{idx}/{len(missing_files)}] {filename}")
         
-        if len(missing_files) > 10:
-            print(f"  ... and {len(missing_files) - 10} more")
-        
-        print("\n⚠ WARNING: The item schema requires these custom files to work properly!")
-        print("Without them, you may experience crashes or missing content.")
-        
-        print("\nWhat would you like to do?")
-        print("  1. Download missing files now")
-        print("  2. Skip (not recommended)")
-        
-        choice = get_user_choice("\nEnter your choice (1 or 2): ", ['1', '2'])
-        
-        if choice == '1':
-            print_header("Downloading Missing Files")
-            
-            successful = 0
-            failed = 0
-            
-            for file_path, filename in missing_files:
-                if download_custom_file(file_path, filename, tf2_dir):
-                    successful += 1
-                else:
-                    failed += 1
-            
-            print(f"\n{'='*60}")
-            print(f"Download Summary:")
-            print(f"  ✓ Successful: {successful}")
-            if failed > 0:
-                print(f"  ✗ Failed: {failed}")
-            print(f"{'='*60}\n")
-            
-            if successful > 0:
-                print("✓ Custom files have been installed!")
+        if download_custom_file(file_path, filename, tf2_dir):
+            successful += 1
         else:
-            print("\n⚠ Skipping custom files download.")
-            print("You can run this tool again later to download them.")
+            failed += 1
+            failed_files.append(filename)
+    
+    # Summary
+    print(f"\n{'='*60}")
+    print("Download Complete!")
+    print(f"{'='*60}")
+    print(f"✓ Successful: {successful}/{len(missing_files)}")
+    if failed > 0:
+        print(f"✗ Failed: {failed}/{len(missing_files)}")
+        print(f"\nFailed files:")
+        for fname in failed_files[:10]:
+            print(f"  • {fname}")
+        if len(failed_files) > 10:
+            print(f"  ... and {len(failed_files) - 10} more")
+    else:
+        print("\n🎉 All files downloaded successfully!")
+    print(f"{'='*60}\n")
 
 
 def get_available_drives() -> List[str]:
